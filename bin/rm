@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# carclaude safe-rm: move targets into the trash instead of deleting them.
+# Resolves ahead of /bin/rm via PATH, so a bare `rm foo` is non-destructive.
+trash="${CARCLAUDE_TRASH:-$PWD/.trash}"
+dest="$trash/$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$dest" 2>/dev/null
+n=0
+missed=0
+opts_done=0
+for a in "$@"; do
+  if [ "$opts_done" -eq 0 ]; then
+    case "$a" in
+      --) opts_done=1; continue ;;   # end of options: treat the rest as paths
+      -*) continue ;;                # ignore flags like -r -f -rf
+    esac
+  fi
+  if [ -e "$a" ] || [ -L "$a" ]; then
+    base="$(basename -- "$a")"
+    target="$dest/$base"
+    [ -e "$target" ] && target="$dest/${base}.$RANDOM"
+    mv -f -- "$a" "$target" 2>/dev/null && n=$((n + 1))
+  else
+    missed=$((missed + 1))
+  fi
+done
+[ "$n" -gt 0 ] && echo "[carclaude] trashed $n item(s) -> $dest" >&2
+# Don't let a no-op look like success: surface paths that matched nothing.
+[ "$missed" -gt 0 ] && echo "[carclaude] $missed path(s) not found / nothing to trash" >&2
+exit 0

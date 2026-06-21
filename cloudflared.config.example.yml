@@ -1,0 +1,16 @@
+# Example cloudflared tunnel config. You already have a Cloudflare URL/tunnel —
+# point its ingress at the local carclaude server. Then: `cloudflared tunnel run <name>`.
+#
+#   ~/.cloudflared/config.yml
+#
+tunnel: <YOUR_TUNNEL_ID_OR_NAME>
+credentials-file: /home/YOUR_USER/.cloudflared/<YOUR_TUNNEL_ID>.json
+
+ingress:
+  - hostname: car.example.com        # <- your Cloudflare hostname
+    service: http://127.0.0.1:8787
+  - service: http_status:404
+
+# STRONGLY RECOMMENDED: put Cloudflare Access (Zero Trust) in front of this hostname
+# (email OTP or Google login) as a second gate, on top of the app's APP_TOKEN. This
+# endpoint can run code on your Pi, so two independent locks is the right posture.

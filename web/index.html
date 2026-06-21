@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="carclaude">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <title>carclaude</title>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>carclaude</h1>
+      <select id="personaSelect" class="persona-select hidden"></select>
+      <div class="meta" id="meta">—</div>
+    </header>
+    <div id="usage" class="usage">—</div>
+    <div id="transcript"></div>
+    <div id="status"></div>
+    <div id="controls">
+      <button id="talk" disabled>Hold to talk</button>
+      <button id="auto" class="icon" title="Hands-free loop">Auto</button>
+      <button id="stop" class="icon" title="Stop / barge-in">Stop</button>
+    </div>
+  </div>
+
+  <div id="tokenOverlay" class="overlay hidden">
+    <div class="card">
+      <h2>Unlock</h2>
+      <p>Enter your access token (the APP_TOKEN from the server). Stored on this device only.</p>
+      <input id="tokenInput" type="password" autocomplete="off" placeholder="access token">
+      <button id="tokenSave">Save & continue</button>
+    </div>
+  </div>
+
+  <audio id="player" playsinline></audio>
+  <script src="app.js"></script>
+</body>
+</html>

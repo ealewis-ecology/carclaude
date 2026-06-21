@@ -1,0 +1,30 @@
+[Unit]
+Description=carclaude voice agent (FastAPI app)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.sh fills these in for the invoking user; never run carclaude as root.
+User=__USER__
+Group=__USER__
+WorkingDirectory=__APPDIR__
+ExecStart=__APPDIR__/run.sh
+Restart=on-failure
+RestartSec=3
+
+# --- hardening: the agent runs arbitrary code as this user, so keep it unprivileged. ---
+# (We deliberately do NOT set ProtectHome/ProtectSystem=strict — the agent must read/write
+#  your project under your home. For stronger isolation, run as a dedicated user with no
+#  SSH/cloud creds and no other repos in its home — see SECURITY.md.)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

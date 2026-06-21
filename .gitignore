@@ -1,0 +1,50 @@
+# ---- secrets (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- virtualenvs ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- runtime state / personal data (do NOT publish) ----
+usage.json
+preferences.json
+history/*.jsonl
+.trash/
+
+# ---- private / local personalities (kept on your machine, never published) ----
+personalities.local/
+personality-jarvis.md
+
+# ---- cloudflared / deploy local config ----
+*.cloudflared.yml
+cloudflared.config.yml
+.cloudflared/
+
+# ---- OS / editor cruft ----
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*~

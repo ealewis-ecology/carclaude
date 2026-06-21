@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# carclaude: route unlink through the trash mechanism too.
+exec "$(dirname "$0")/rm" "$@"

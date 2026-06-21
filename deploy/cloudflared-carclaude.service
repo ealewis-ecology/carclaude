@@ -1,0 +1,17 @@
+[Unit]
+Description=cloudflared tunnel for carclaude
+After=network-online.target carclaude.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.sh fills these in for the invoking user.
+User=__USER__
+Group=__USER__
+ExecStart=/usr/local/bin/cloudflared --config __CFGDIR__/config.yml --no-autoupdate tunnel run carclaude
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

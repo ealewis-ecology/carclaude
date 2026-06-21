@@ -1,0 +1,16 @@
+{
+  "model": "claude-opus-4-8",
+  "effort": "medium",
+  "pause_ms": 1000,
+  "max_ms": 30000,
+  "speech_rate": 1.0,
+  "notes": "",
+  "barge_sensitivity": 5,
+  "read_only": false,
+  "max_words": 0,
+  "max_turns": 0,
+  "daily_budget_usd": 0,
+  "tts_model": "eleven_turbo_v2_5",
+  "stt_language": "",
+  "recall_turns": 6
+}

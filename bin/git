@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# carclaude: git is disabled for the in-car agent.
+echo "[carclaude] git is disabled in the in-car agent." >&2
+exit 127

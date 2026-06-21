@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# carclaude: route rmdir through the same trash mechanism as rm.
+exec "$(dirname "$0")/rm" "$@"
