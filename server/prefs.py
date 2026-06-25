@@ -17,6 +17,8 @@ Fields:
   tts_model        ElevenLabs model ("fast"=flash, "quality"=turbo)
   stt_language     STT language hint, e.g. "en" ("" = auto)
   recall_turns     past turns auto-recalled at session start (0 = off)  0..30
+  status_ack       speak a short acknowledgement when a command registers (true/false)
+  ack_phrase       what that acknowledgement says (short; spoken in the persona voice)
 """
 from __future__ import annotations
 
@@ -80,6 +82,7 @@ def load() -> dict:
         "read_only": False, "max_words": 0, "max_turns": 0, "daily_budget_usd": 0.0,
         "tts_model": settings.elevenlabs_model or "eleven_turbo_v2_5", "stt_language": "",
         "recall_turns": 6,
+        "status_ack": True, "ack_phrase": "On it.",
     }
     try:
         raw = json.loads(_FILE.read_text())
@@ -105,6 +108,10 @@ def load() -> dict:
         lang = str(raw.get("stt_language", "")).strip().lower()
         if lang and lang.replace("-", "").isalnum() and len(lang) <= 10:
             d["stt_language"] = lang
+        d["status_ack"] = _bool(raw.get("status_ack"), True)
+        ap = raw.get("ack_phrase")
+        if isinstance(ap, str) and ap.strip():
+            d["ack_phrase"] = ap.strip()[:60]   # short: it's spoken on every turn
     return d
 
 

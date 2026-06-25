@@ -7,7 +7,7 @@
 
 const $ = (id) => document.getElementById(id);
 const transcript = $('transcript'), statusEl = $('status'), meta = $('meta');
-const talkBtn = $('talk'), autoBtn = $('auto'), stopBtn = $('stop'), player = $('player');
+const talkBtn = $('talk'), autoBtn = $('auto'), stopBtn = $('stop'), clearBtn = $('clear'), player = $('player'), ackPlayer = $('ackPlayer');
 
 let token = localStorage.getItem('carclaude_token') || '';
 let auto = false;                 // hands-free loop armed
@@ -19,6 +19,19 @@ let msgAbort = null;
 let vadPauseMs = 1000, vadMaxMs = 30000;   // VAD timing, live from /api/config
 let bargeSensitivity = 5;                  // 1 (hard to interrupt) .. 10 (easy)
 let assistantEl = null;
+let clearing = false;             // a button /clear is driving completion; suppress the aborted-stream tail
+
+// Spoken acknowledgement ("On it") in the persona voice the instant a command registers, so a
+// driver hears it landed — before the agent's thinking/tools and well before the real reply.
+// Synthesized once per phrase via /api/tts and cached (instant + free after first use), cleared
+// when the persona/voice or phrase changes. Plays on its own <audio> so it never tangles with
+// the reply player or its finishTurn handlers.
+let ackEnabled = true, ackPhrase = 'On it.';   // live from /api/config (voice-tunable prefs)
+let ackCache = new Map();         // phrase -> object URL of its synthesized audio
+let ackAbort = null;              // in-flight ack TTS fetch (abortable on stop/barge/turn-end)
+let ackPlaying = false;           // ack audio currently sounding (pauses barge self-trigger)
+let replyStarted = false;         // the real reply is synthesizing/playing -> suppress a late ack
+let turnSeq = 0;                  // bumps each turn / on stop / on turn-end -> invalidates a stale ack
 
 // ----------------------------------------------------------------- helpers
 function setStatus(s) { statusEl.textContent = s || ''; }
@@ -39,6 +52,23 @@ function rms(buf) {
   let s = 0; for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
   return Math.sqrt(s / buf.length);
 }
+
+// Voice "/clear": only a whole utterance that IS the command triggers a reset, so a request
+// like "clear the build directory" still reaches the agent untouched. Kept to unambiguous
+// meta-commands about the conversation — phrases that double as task instructions ("start
+// over") or imply erasing the on-disk log ("clear history") are deliberately excluded.
+const CLEAR_PHRASES = new Set([
+  'clear', 'clear conversation', 'clear the conversation', 'clear context', 'clear the context',
+  'clear chat', 'new conversation', 'reset conversation', 'reset the conversation',
+]);
+function isClearCommand(text) {
+  let s = (text || '').toLowerCase().trim();
+  s = s.replace(/^\/+/, '');                            // a literal "/clear"
+  s = s.replace(/^(forward[- ]|back[- ])?slash\s+/, ''); // STT of "/" -> "slash clear"
+  s = s.replace(/[.!?,;:]+$/g, '').replace(/\s+/g, ' ').trim();
+  return CLEAR_PHRASES.has(s);
+}
+function resetTranscript() { transcript.innerHTML = ''; assistantEl = null; }
 
 // ----------------------------------------------------------------- token gate
 function showToken() { $('tokenOverlay').classList.remove('hidden'); }
@@ -65,12 +95,14 @@ async function ensureMic() {                 // acquire the mic (gates recording
   }
 }
 function primeAudio() {                       // unlock <audio> playback for later TTS (non-blocking)
-  try {
-    player.muted = true;
-    const p = player.play();
-    if (p && p.catch) p.catch(() => {});
-    setTimeout(() => { try { player.pause(); player.muted = false; } catch (e) {} }, 40);
-  } catch (e) {}
+  for (const el of [player, ackPlayer]) {     // both the reply player and the ack-cue player
+    try {
+      el.muted = true;
+      const p = el.play();
+      if (p && p.catch) p.catch(() => {});
+      setTimeout(() => { try { el.pause(); el.muted = false; } catch (e) {} }, 40);
+    } catch (e) {}
+  }
 }
 
 function pickMime() {
@@ -160,6 +192,7 @@ function startBargeMonitor() {
     analyser.getByteTimeDomainData(buf);
     const r = rms(buf);
     base = base * 0.92 + r * 0.08;                  // always track ambient (incl. TTS echo)
+    if (ackPlaying) { loud = 0; return; }            // our own ack cue is sounding — don't self-barge
     if (++ticks < 8) return;                         // ~560ms warmup before it can fire
     if (r > Math.max(0.05, base * MULT)) { if (++loud >= NEED) bargeIn(); }
     else loud = Math.max(0, loud - 1);
@@ -168,13 +201,52 @@ function startBargeMonitor() {
 function stopBargeMonitor() { if (bargeTimer) { clearInterval(bargeTimer); bargeTimer = null; } }
 
 function interruptActive() {            // stop agent audio + request + server turn
-  stopBargeMonitor();
+  stopBargeMonitor(); stopAck();
   try { player.pause(); } catch (e) {}
   if (msgAbort) { try { msgAbort.abort(); } catch (e) {} msgAbort = null; }
   api('/api/interrupt', { method: 'POST' }).catch(() => {});
   busy = false; talkBtn.disabled = false;
 }
 function bargeIn() { interruptActive(); setStatus('Go ahead…'); startRec(true); }
+
+// ----------------------------------------------------------------- spoken acknowledgement
+function clearAckCache() {                    // persona/voice or phrase changed -> re-synthesize
+  ackCache.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) {} });
+  ackCache.clear();
+}
+function stopAck() {                          // silence + invalidate any pending/playing ack cue
+  ackPlaying = false;
+  try { ackPlayer.pause(); } catch (e) {}
+  if (ackAbort) { try { ackAbort.abort(); } catch (e) {} ackAbort = null; }
+  turnSeq++;                                  // a fetch still in flight for that turn won't play
+}
+// Speak the short "command registered" cue. Best-effort: every failure is swallowed so it can
+// never disrupt the turn. Cached per phrase, so only the first use of a phrase hits the network;
+// after that it's instant and free. `myTurn` guards against a slow (uncached) synth landing after
+// the turn moved on or the real reply already started.
+async function playAck(myTurn) {
+  if (!ackEnabled || !token) return;
+  const phrase = ackPhrase;
+  try {
+    let url = ackCache.get(phrase);
+    if (!url) {
+      ackAbort = new AbortController();
+      const r = await api('/api/tts', {
+        method: 'POST', signal: ackAbort.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: phrase })
+      });
+      ackAbort = null;
+      if (!r.ok) return;
+      url = URL.createObjectURL(await r.blob());
+      ackCache.set(phrase, url);
+    }
+    if (myTurn !== turnSeq || replyStarted) return;   // turn ended, or the reply already owns audio
+    ackPlaying = true;
+    ackPlayer.src = url;
+    ackPlayer.onended = ackPlayer.onerror = () => { ackPlaying = false; };
+    await ackPlayer.play().catch(() => { ackPlaying = false; });
+  } catch (e) { ackPlaying = false; }
+}
 
 // ----------------------------------------------------------------- one turn
 async function handleAudio(blob) {
@@ -188,9 +260,11 @@ async function handleAudio(blob) {
     if (!r.ok) { setStatus('STT error'); return finishTurn(); }
     const text = ((await r.json()).text || '').trim();
     if (!text) { setStatus("Didn't catch that."); return finishTurn(); }
+    if (isClearCommand(text)) return clearConversation(true);   // spoken /clear
     addMsg('user', text);
     await streamMessage(text);
   } catch (e) {
+    if (e.name === 'AbortError' && clearing) return;   // a button /clear owns the completion
     if (e.name !== 'AbortError') setStatus('Error: ' + e.message);
     finishTurn();
   }
@@ -198,7 +272,10 @@ async function handleAudio(blob) {
 
 async function streamMessage(text) {
   setStatus('Thinking…');
+  replyStarted = false;
+  const myTurn = ++turnSeq;
   startBargeMonitor();
+  playAck(myTurn);                  // spoken "on it" in the persona voice while the agent works
   assistantEl = null;
   let full = '';
   msgAbort = new AbortController();
@@ -243,6 +320,7 @@ function onEvent(evt, full) {
 
 async function speak(text) {
   if (!text) return finishTurn();
+  replyStarted = true;                          // a late ack cue must not talk over the real reply
   try {
     setStatus('Speaking…');
     const r = await api('/api/tts', {
@@ -250,6 +328,7 @@ async function speak(text) {
     });
     if (!r.ok) { setStatus('TTS error'); return finishTurn(); }
     const url = URL.createObjectURL(await r.blob());
+    ackPlaying = false; try { ackPlayer.pause(); } catch (e) {}   // hand off the speaker from the cue
     player.src = url;
     player.onended = () => { URL.revokeObjectURL(url); finishTurn(); };
     player.onerror = () => finishTurn();
@@ -259,15 +338,31 @@ async function speak(text) {
 
 function finishTurn() {
   stopBargeMonitor();
-  busy = false; talkBtn.disabled = false; msgAbort = null;
+  busy = false; talkBtn.disabled = false; msgAbort = null; replyStarted = false;
+  turnSeq++;                                    // a still-pending ack for this turn won't play
+  if (ackAbort) { try { ackAbort.abort(); } catch (e) {} ackAbort = null; }
   if (auto) relisten(); else setStatus('Ready');
 }
 function relisten() { setStatus('Listening…'); setTimeout(() => { if (auto && !busy && !recorder) startRec(true); }, 200); }
 
+// carclaude's /clear: server drops the live session + auto-recall, the UI wipes the transcript.
+// `spoken` true (voice trigger) speaks a short confirmation; false (button) is silent.
+async function clearConversation(spoken) {
+  cancelRec(); stopBargeMonitor(); stopAck();
+  setStatus('Clearing…');
+  try { await api('/api/clear', { method: 'POST' }); } catch (e) {}
+  resetTranscript();
+  addMsg('system', 'Conversation cleared.');
+  clearing = false;                                    // we own the completion from here
+  if (spoken) return speak('Conversation cleared.');   // speaks, then finishTurn (relisten if auto)
+  busy = false; talkBtn.disabled = false; msgAbort = null;
+  if (auto) relisten(); else setStatus('Conversation cleared.');
+}
+
 function stopAll() {
   auto = false; autoBtn.classList.remove('on');
   holding = false;
-  cancelRec(); stopBargeMonitor();
+  cancelRec(); stopBargeMonitor(); stopAck();
   if (msgAbort) { try { msgAbort.abort(); } catch (e) {} msgAbort = null; }
   api('/api/interrupt', { method: 'POST' }).catch(() => {});
   try { player.pause(); } catch (e) {}
@@ -305,6 +400,25 @@ autoBtn.onclick = async () => {
 };
 
 stopBtn.onclick = stopAll;
+// Clear wipes the conversation, so it's a tap-to-arm: the first tap turns it red ("Sure?"),
+// a second tap within 3s confirms — guarding against a blind mis-tap while reaching for Stop.
+// (The spoken "/clear" is already an explicit whole-utterance command and needs no second step.)
+let clearTimer = null;
+function disarmClear() {
+  if (clearTimer) { clearTimeout(clearTimer); clearTimer = null; }
+  clearBtn.classList.remove('arm'); clearBtn.textContent = 'Clear';
+}
+clearBtn.onclick = () => {
+  if (!clearTimer) {                                   // first tap: arm
+    clearBtn.classList.add('arm'); clearBtn.textContent = 'Sure?';
+    clearTimer = setTimeout(disarmClear, 3000);
+    return;
+  }
+  disarmClear();                                       // second tap: confirm + reset
+  clearing = true;
+  if (busy) interruptActive();    // barge in on a turn in flight, then reset
+  clearConversation(false);
+};
 
 // ----------------------------------------------------------------- persona + config + usage
 async function loadPersonas() {
@@ -330,6 +444,7 @@ async function selectPersona(id, silent) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
     })).json();
     if (!silent) setStatus('Switched to ' + (d.name || id) + ' — applies on the next reply');
+    clearAckCache();              // new persona = new voice -> re-synthesize the ack cue
   } catch (e) {}
 }
 const personaSel = $('personaSelect');
@@ -342,6 +457,8 @@ async function loadConfig() {
     if (c.pause_ms) vadPauseMs = c.pause_ms;
     if (c.max_ms) vadMaxMs = c.max_ms;
     if (c.barge_sensitivity) bargeSensitivity = c.barge_sensitivity;
+    if (typeof c.status_ack === 'boolean') ackEnabled = c.status_ack;
+    if (c.ack_phrase && c.ack_phrase !== ackPhrase) { ackPhrase = c.ack_phrase; clearAckCache(); }
     meta.textContent = (c.model || '') + ' · ' + (c.stt || '') + '/' + (c.tts || '');
   } catch (e) {}
 }

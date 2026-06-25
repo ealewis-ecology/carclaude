@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from server.config import WEB_DIR, settings
-from server import personalities, prefs, state, usage, voice
+from server import history, personalities, prefs, state, usage, voice
 from server.agent import CarAgent
 
 _agent: CarAgent | None = None
@@ -90,7 +90,8 @@ async def api_config() -> dict:
             "stt": settings.stt_provider, "tts": settings.tts_provider,
             "persona": state.persona_name, "effort": p["effort"],
             "pause_ms": p["pause_ms"], "max_ms": p["max_ms"],
-            "barge_sensitivity": p["barge_sensitivity"]}
+            "barge_sensitivity": p["barge_sensitivity"],
+            "status_ack": p["status_ack"], "ack_phrase": p["ack_phrase"]}
 
 
 @app.get("/api/personalities", dependencies=[Depends(require_token)])
@@ -170,6 +171,33 @@ async def api_interrupt() -> dict:
     """Barge-in: stop the agent's current turn so the next one (or silence) can take over."""
     if _agent is not None:
         await _agent.interrupt()
+    return {"ok": True}
+
+
+@app.post("/api/clear", dependencies=[Depends(require_token)])
+async def api_clear() -> dict:
+    """Reset the conversation like Claude Code's /clear: drop the live session's context and
+    stop auto-recalling earlier turns. The on-disk transcript is kept (the agent can still be
+    asked to look further back); only what it is handed at the start of the next turn resets."""
+    # Barge in on any turn in flight, then try to take the turn lock so the in-flight turn's
+    # final history.record() lands *before* our boundary marker (recall stops at the right
+    # point). The mark itself is a single synchronous append — no torn write is possible under
+    # single-threaded asyncio — so on a lock timeout we still mark, rather than dropping the live
+    # session yet silently leaving recall intact.
+    if _agent is not None:
+        await _agent.interrupt()
+    got = False
+    try:
+        await asyncio.wait_for(_turn_lock.acquire(), timeout=10)
+        got = True
+    except asyncio.TimeoutError:
+        pass
+    try:
+        state.bump()             # next turn rebuilds the SDK session -> fresh conversation
+        history.clear()          # mark the recall boundary whether or not we got the lock
+    finally:
+        if got:
+            _turn_lock.release()
     return {"ok": True}
 
 

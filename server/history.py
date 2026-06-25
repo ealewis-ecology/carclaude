@@ -40,19 +40,8 @@ def _one_line(s: str, limit: int) -> str:
     return s if len(s) <= limit else s[: limit - 1] + "…"
 
 
-def record(persona: str, user: str, assistant: str, tools: list[str] | None = None) -> None:
-    """Append one completed turn. No-op if both sides are empty."""
-    user = (user or "").strip()
-    assistant = (assistant or "").strip()
-    if not user and not assistant:
-        return
-    rec = {
-        "ts": _now(),
-        "persona": (persona or "")[:80],
-        "user": user[:_FIELD_CHARS],
-        "assistant": assistant[:_FIELD_CHARS],
-        "tools": [str(t)[:160] for t in (tools or [])][:12],
-    }
+def _append(rec: dict) -> None:
+    """Append one JSON record to the log (creating it 0600), rolling off old lines."""
     try:
         DIR.mkdir(parents=True, exist_ok=True)
         lines = FILE.read_text(encoding="utf-8").splitlines() if FILE.exists() else []
@@ -66,19 +55,47 @@ def record(persona: str, user: str, assistant: str, tools: list[str] | None = No
         pass
 
 
+def record(persona: str, user: str, assistant: str, tools: list[str] | None = None) -> None:
+    """Append one completed turn. No-op if both sides are empty."""
+    user = (user or "").strip()
+    assistant = (assistant or "").strip()
+    if not user and not assistant:
+        return
+    _append({
+        "ts": _now(),
+        "persona": (persona or "")[:80],
+        "user": user[:_FIELD_CHARS],
+        "assistant": assistant[:_FIELD_CHARS],
+        "tools": [str(t)[:160] for t in (tools or [])][:12],
+    })
+
+
+def clear() -> None:
+    """Mark a conversation boundary (carclaude's /clear). Auto-recall (`recent`/`digest`)
+    won't read across it, so the next session starts with a clean slate. The full transcript
+    stays on disk — the agent can still be asked to grep further back — only what it is
+    *handed* at session start resets."""
+    _append({"ts": _now(), "clear": True})
+
+
 def recent(n: int = 8) -> list[dict]:
-    """The last n turns as dicts (oldest first)."""
+    """The last n turns as dicts (oldest first), not reaching past the most recent clear
+    boundary (see `clear`)."""
     try:
         lines = FILE.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     out: list[dict] = []
-    for ln in lines[-n:] if n > 0 else lines:
+    for ln in lines:
         try:
-            out.append(json.loads(ln))
+            obj = json.loads(ln)
         except ValueError:
-            pass
-    return out
+            continue
+        if obj.get("clear"):
+            out.clear()                  # boundary — forget everything before it for recall
+        elif obj.get("user") or obj.get("assistant"):
+            out.append(obj)
+    return out[-n:] if n > 0 else out
 
 
 def digest(n: int = 6, max_chars: int = 1400) -> str:

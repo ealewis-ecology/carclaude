@@ -34,6 +34,8 @@ button.icon { width:60px; height:60px; border-radius:16px; border:1px solid #283
   color:var(--fg); font-size:13px; font-weight:600; }
 button.icon.on { background:var(--ok); color:#04121f; border-color:var(--ok); }
 #stop { background:var(--tool); }
+#clear { background:#241b1e; color:#d9b3b8; border-color:#3a2a2e; }   /* distinct from Stop */
+#clear.arm, #clear:active { background:#5a2a30; color:#fff; border-color:#7a3a40; }   /* armed/pressed */
 
 .overlay { position:fixed; inset:0; background:rgba(5,8,11,.92); display:flex; align-items:center;
   justify-content:center; padding:24px; z-index:10; }

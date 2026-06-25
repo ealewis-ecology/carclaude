@@ -17,3 +17,10 @@ def select(pid: str, name: str, prompt: str, vid: str | None) -> None:
     global persona_id, persona_name, persona_prompt, voice_id, token
     persona_id, persona_name, persona_prompt, voice_id = pid, name, prompt, vid
     token += 1
+
+
+def bump() -> None:
+    """Force the agent to rebuild its live session on the next turn — a fresh conversation
+    with no carried-over context. Used by /clear; persona `select` does this implicitly."""
+    global token
+    token += 1

@@ -65,8 +65,10 @@ claude-fable-5), "effort" (low/medium/high/xhigh/max — how hard you think), "s
 interrupted), "read_only" (true = make no file changes and run nothing), "max_words" \
 (reply length cap, 0 = none), "max_turns" (tool-loop cap, 0 = default), "daily_budget_usd" \
 (advisory daily limit), "tts_model" ("fast" or "quality"), "stt_language" (e.g. "en"), \
-"recall_turns" (how many past turns to auto-recall at session start, 0 = off). \
-Model and effort apply on your next turn.
+"recall_turns" (how many past turns to auto-recall at session start, 0 = off), \
+"status_ack" (true = speak a short acknowledgement the moment a command registers, so the \
+driver hears it landed before your reply), "ack_phrase" (what that acknowledgement says, e.g. \
+"On it"). Model and effort apply on your next turn.
 - {PROJECT_ROOT}/personalities/<id>.md — persona files: frontmatter with \
 `name` and `voice_id`, then the personality prompt. Add or edit one to create/change a \
 personality."""

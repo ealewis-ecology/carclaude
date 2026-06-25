@@ -76,7 +76,15 @@ units for your user — never as root).
 
 On the phone: open your Cloudflare URL in Safari → **Share → Add to Home Screen**. Open it,
 paste `APP_TOKEN` once. **Hold to talk** for push-to-talk, or tap **Auto** for the hands-free
-loop (it re-listens after each reply). **Stop** barges in.
+loop (it re-listens after each reply). **Stop** barges in. **Clear** starts a fresh
+conversation (or just say "clear") — it drops the live context and stops auto-recalling
+earlier turns; the on-disk transcript is kept.
+
+The instant a command registers, the assistant speaks a short acknowledgement (default "On it")
+in its own voice — so while driving you can hear that it landed and is working, before the full
+reply arrives. It's synthesized once and cached, so it's instant and free after the first use.
+Say "turn off acknowledgements" to silence it, or ask it to change what it says
+(`status_ack` / `ack_phrase` in `preferences.json`).
 
 ## Personalities
 
