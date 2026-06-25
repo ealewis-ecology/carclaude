@@ -8,7 +8,7 @@ Type=simple
 # install.sh fills these in for the invoking user.
 User=__USER__
 Group=__USER__
-ExecStart=/usr/local/bin/cloudflared --config __CFGDIR__/config.yml --no-autoupdate tunnel run carclaude
+ExecStart=/usr/local/bin/cloudflared --config __CFGDIR__/config.yml --no-autoupdate tunnel run voiceclaude
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

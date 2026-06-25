@@ -22,7 +22,7 @@ echo "Installing for user '$TARGET_USER', app dir '$APPDIR'…"
 
 echo "Stopping any manually-run instances (ignore errors)…"
 pkill -f "uvicorn server.main:app" 2>/dev/null || true
-pkill -f "cloudflared tunnel run carclaude" 2>/dev/null || true
+pkill -f "cloudflared tunnel run voiceclaude" 2>/dev/null || true
 
 render() {  # $1 = unit filename; substitute placeholders, then install
   sed -e "s|__USER__|$TARGET_USER|g" \
