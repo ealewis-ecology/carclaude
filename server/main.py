@@ -90,8 +90,9 @@ async def api_config() -> dict:
             "stt": settings.stt_provider, "tts": settings.tts_provider,
             "persona": state.persona_name, "effort": p["effort"],
             "pause_ms": p["pause_ms"], "max_ms": p["max_ms"],
-            "barge_sensitivity": p["barge_sensitivity"],
-            "status_ack": p["status_ack"], "ack_phrase": p["ack_phrase"]}
+            "barge_sensitivity": p["barge_sensitivity"], "speech_floor": p["speech_floor"],
+            "status_ack": p["status_ack"], "ack_thinking": p["ack_thinking"],
+            "ack_delay_ms": p["ack_delay_ms"], "ack_phrase": p["ack_phrase"]}
 
 
 @app.get("/api/personalities", dependencies=[Depends(require_token)])

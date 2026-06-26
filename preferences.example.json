@@ -6,6 +6,7 @@
   "speech_rate": 1.0,
   "notes": "",
   "barge_sensitivity": 5,
+  "speech_floor": 0.012,
   "read_only": false,
   "max_words": 0,
   "max_turns": 0,

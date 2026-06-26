@@ -18,18 +18,28 @@ let audioCtx = null, analyser = null, vadTimer = null, bargeTimer = null;
 let msgAbort = null;
 let vadPauseMs = 1000, vadMaxMs = 30000;   // VAD timing, live from /api/config
 let bargeSensitivity = 5;                  // 1 (hard to interrupt) .. 10 (easy)
+let vadSpeechFloor = 0.012;                // min normalized RMS (0..1) that counts as speech; live from /api/config
+let DEBUG_VAD = true;                       // TEMP: surface live VAD telemetry in the status line (iOS Auto diagnosis)
 let assistantEl = null;
 let clearing = false;             // a button /clear is driving completion; suppress the aborted-stream tail
 
-// Spoken acknowledgement ("On it") in the persona voice the instant a command registers, so a
-// driver hears it landed — before the agent's thinking/tools and well before the real reply.
-// Synthesized once per phrase via /api/tts and cached (instant + free after first use), cleared
-// when the persona/voice or phrase changes. Plays on its own <audio> so it never tangles with
-// the reply player or its finishTurn handlers.
-let ackEnabled = true, ackPhrase = 'On it.';   // live from /api/config (voice-tunable prefs)
+// Spoken activity cues in the persona voice — only when the turn is real work. The server names
+// each action ("Reading files.", "Running a command.", "Searching the web.") and streams it as a
+// `status` event; the client speaks that, so the driver hears WHAT it's doing rather than a generic
+// "On it." The pure-thinking cue (no tool yet, past ackDelayMs) is `ackPhrase` ("Thinking.") and
+// fires only when `ackThinking` is on — off by default, so plain thinking stays silent and only tool
+// actions cue. A quick one-shot answer reaches the reply first and stays silent, so cues aren't
+// repeated after every prompt. Each distinct phrase is synthesized once via /api/tts and cached
+// (instant + free after first use), cleared when the persona/voice changes. Plays on its own
+// <audio> so it never tangles with the reply player or its finishTurn handlers.
+let ackEnabled = true, ackPhrase = 'Thinking.';   // live from /api/config (voice-tunable prefs)
+let ackThinking = false;          // speak the pure-thinking cue (no tool yet)? tool cues ignore this
+let ackDelayMs = 2500;            // when ackThinking is on, how long the agent may think first (0 = every turn)
 let ackCache = new Map();         // phrase -> object URL of its synthesized audio
-let ackAbort = null;              // in-flight ack TTS fetch (abortable on stop/barge/turn-end)
+let ackAbort = null;              // in-flight ack TTS fetch (abortable on stop/barge/turn-end/supersede)
+let ackTimer = null;              // pending "thinking" cue (fires if the turn runs long with no tool)
 let ackPlaying = false;           // ack audio currently sounding (pauses barge self-trigger)
+let ackSeq = 0;                   // identifies the latest cue; a superseded one must not mutate shared ack state
 let replyStarted = false;         // the real reply is synthesizing/playing -> suppress a late ack
 let turnSeq = 0;                  // bumps each turn / on stop / on turn-end -> invalidates a stale ack
 
@@ -92,6 +102,13 @@ async function ensureMic() {                 // acquire the mic (gates recording
     });
     const src = audioCtx.createMediaStreamSource(micStream);
     analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024; src.connect(analyser);
+    // iOS Safari only advances an AnalyserNode fed by getUserMedia when the audio graph actually
+    // terminates at the destination; left dangling, getByteTimeDomainData stays flat (constant 128,
+    // RMS ~0) on iPhone — so the VAD never hears speech and Auto never submits (push-to-talk is fine
+    // because it uses MediaRecorder, not this graph). Route the analyser to the destination through a
+    // muted node (gain 0 = silent, no feedback) to force the graph to render. Desktop is unaffected.
+    const sink = audioCtx.createGain(); sink.gain.value = 0;
+    analyser.connect(sink); sink.connect(audioCtx.destination);
   }
 }
 function primeAudio() {                       // unlock <audio> playback for later TTS (non-blocking)
@@ -117,6 +134,10 @@ function clearRecTimer() { if (recTimer) { clearTimeout(recTimer); recTimer = nu
 function startRec(useVad) {
   if (busy || !micStream) return;
   if (recorder) { if (recorder.state !== 'inactive') return; recorder = null; }  // drop stale
+  // iOS Safari suspends the AudioContext after the TTS <audio> plays; the hands-free relisten
+  // never goes through ensureMic, so the VAD's analyser would read flat silence and never submit.
+  // Resume it here (idempotent, fire-and-forget) so every record window has a live analyser.
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   stopBargeMonitor();
   chunks = [];
   recMime = pickMime();
@@ -158,21 +179,40 @@ function startVad() {
   stopVad();
   const buf = new Uint8Array(analyser.fftSize);
   const t0 = Date.now();
-  let floor = 0.03, spokeAt = 0, quietSince = 0, ticks = 0;
+  let floor = 0.03, lastVoice = 0, ticks = 0;
   const HANG = vadPauseMs, MAXMS = vadMaxMs, MINMS = 400;
   vadTimer = setInterval(() => {
     analyser.getByteTimeDomainData(buf);
     const r = rms(buf), now = Date.now(), elapsed = now - t0;
-    if (++ticks < 6) { floor = floor * 0.5 + r * 0.5; return; }   // warm up the noise floor
-    const speakT = Math.max(0.05, floor * 2.0);
-    const silenceT = Math.max(0.03, floor * 1.3);
-    if (r > speakT) { spokeAt = now; quietSince = 0; }
-    else {
-      if (r < silenceT) { if (!quietSince) quietSince = now; } else quietSince = 0;
-      floor = floor * 0.92 + r * 0.08;                            // track floor while not speaking
-    }
+    // TEMP diagnostic: live VAD telemetry in the status line. state(r/s/c) · rms · floor · ms since the
+    // last speech-level sample (counts up while you pause; submits when it passes the pause setting) ·
+    // elapsed (deciseconds). If rms never moves while you talk, the analyser is flat (WebAudio graph).
+    if (DEBUG_VAD) setStatus(`L ${audioCtx ? audioCtx.state[0] : '?'} rms${Math.round(r * 1000)} fl${Math.round(floor * 1000)} v${lastVoice ? Math.round(now - lastVoice) : '-'} t${Math.round(elapsed / 100)}`);
+    // Warm up the noise floor, but cap it: if the window opens on a loud transient (echo of the
+    // reply that just finished), an unclamped floor pushes speakT above normal speech and we'd
+    // never register that the user spoke — so we'd never submit.
+    if (++ticks < 6) { floor = Math.min(0.06, floor * 0.5 + r * 0.5); return; }
+    // Track the noise floor EVERY tick as a fast-falling minimum with a slow upward leak. The old
+    // code updated the floor only on non-speech ticks (r <= speakT), so a pause whose level sat
+    // ABOVE speakT — a close headset/boom mic, where autoGainControl ramps the gain up the instant
+    // you stop talking and inflates breath/self-noise into a steady plateau — froze the floor and
+    // re-armed lastVoice every tick: the pause clock never advanced and it listened to the 30s cap.
+    // Falling to meet quiet dips keeps the floor pinned at the valleys of MODULATED speech (so faint
+    // far-field car speech still towers over speakT and is never cut off); a steady plateau with no
+    // dips makes the floor leak upward until speakT clears it and end-of-turn fires ~pause_ms later.
+    // The 0.30 cap bounds it so a loud sustained passage can't push speakT above real speech.
+    if (r < floor) floor = floor * 0.7 + r * 0.3;        // fall fast toward a quiet dip
+    else floor = Math.min(0.30, floor + 0.0015);         // steady plateau: leak the floor up slowly
+    // floor*2.0 is the adaptive bar; vadSpeechFloor is the absolute backstop for dead silence AND
+    // the knob quiet mics lower (default 0.012) so faint speech still clears it. See speech_floor pref.
+    const speakT = Math.max(vadSpeechFloor, floor * 2.0);
+    if (r > speakT) lastVoice = now;                      // speech-level audio right now
     if (elapsed > MAXMS) return stopRec();
-    if (spokeAt && elapsed > MINMS && quietSince && (now - quietSince) > HANG) stopRec();
+    // End the turn once we've heard speech and HANG ms have passed with no speech-level audio.
+    // Measuring the pause from the LAST speech sample (not from reaching deep silence) is what makes
+    // end-of-turn fire reliably in mild ambient — the old "wait for true silence" never tripped when
+    // the room floor sat above that silence threshold, so it listened until the 30s hard cap.
+    if (lastVoice && elapsed > MINMS && (now - lastVoice) > HANG) stopRec();
   }, 60);
 }
 function stopVad() { if (vadTimer) { clearInterval(vadTimer); vadTimer = null; } }
@@ -194,7 +234,7 @@ function startBargeMonitor() {
     base = base * 0.92 + r * 0.08;                  // always track ambient (incl. TTS echo)
     if (ackPlaying) { loud = 0; return; }            // our own ack cue is sounding — don't self-barge
     if (++ticks < 8) return;                         // ~560ms warmup before it can fire
-    if (r > Math.max(0.05, base * MULT)) { if (++loud >= NEED) bargeIn(); }
+    if (r > Math.max(vadSpeechFloor, base * MULT)) { if (++loud >= NEED) bargeIn(); }
     else loud = Math.max(0, loud - 1);
   }, 70);
 }
@@ -215,18 +255,36 @@ function clearAckCache() {                    // persona/voice or phrase changed
   ackCache.clear();
 }
 function stopAck() {                          // silence + invalidate any pending/playing ack cue
+  clearAckTimer();
   ackPlaying = false;
   try { ackPlayer.pause(); } catch (e) {}
   if (ackAbort) { try { ackAbort.abort(); } catch (e) {} ackAbort = null; }
   turnSeq++;                                  // a fetch still in flight for that turn won't play
 }
-// Speak the short "command registered" cue. Best-effort: every failure is swallowed so it can
-// never disrupt the turn. Cached per phrase, so only the first use of a phrase hits the network;
-// after that it's instant and free. `myTurn` guards against a slow (uncached) synth landing after
-// the turn moved on or the real reply already started.
-async function playAck(myTurn) {
-  if (!ackEnabled || !token) return;
-  const phrase = ackPhrase;
+function clearAckTimer() { if (ackTimer) { clearTimeout(ackTimer); ackTimer = null; } }
+// Arm the "thinking" cue for a turn. It sounds ONLY when the turn is real work — the agent is still
+// working after ackDelayMs with no tool yet (long thinking / a long reply). A quick one-shot answer
+// reaches `speak` first and clears the timer, so it stays silent. Tool actions cue themselves via
+// the server's `status` events (handled in onEvent), independent of this timer.
+function armAck(myTurn) {
+  clearAckTimer();
+  if (!ackEnabled || !ackThinking) return;                  // pure-thinking cue off -> only tools cue
+  if (ackDelayMs <= 0) return playAck(myTurn, ackPhrase);   // 0 = cue every turn (old always-on behavior)
+  ackTimer = setTimeout(() => { ackTimer = null; playAck(myTurn, ackPhrase); }, ackDelayMs);
+}
+// Speak a short cue (`phrase`). Best-effort: every failure is swallowed so it can never disrupt the
+// turn. A newer cue supersedes the current one: we tear the current cue down up front (abort its
+// synth, stop its audio, drop the flag) so no stale audio outlives its owner and ackPlaying can
+// never be orphaned true (which would deafen barge-in for the rest of the turn). `mine`/ackSeq then
+// guards the async synth gap so a superseded cue can't resurrect the flag once a newer one owns it.
+// Cached per phrase, so only a phrase's first use hits the network; after that it's instant and free.
+async function playAck(myTurn, phrase) {
+  if (!ackEnabled || !token || !phrase) return;
+  if (myTurn !== turnSeq || replyStarted) return;       // turn ended, or the reply already owns audio
+  const mine = ++ackSeq;                                 // identity: a newer cue supersedes this one
+  // Tear down whatever cue is in flight/sounding so this one cleanly replaces it.
+  if (ackAbort) { try { ackAbort.abort(); } catch (e) {} ackAbort = null; }
+  ackPlaying = false; try { ackPlayer.pause(); } catch (e) {}
   try {
     let url = ackCache.get(phrase);
     if (!url) {
@@ -235,17 +293,21 @@ async function playAck(myTurn) {
         method: 'POST', signal: ackAbort.signal,
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: phrase })
       });
+      if (mine !== ackSeq) return;                      // a newer cue superseded us during synth
       ackAbort = null;
       if (!r.ok) return;
       url = URL.createObjectURL(await r.blob());
       ackCache.set(phrase, url);
     }
-    if (myTurn !== turnSeq || replyStarted) return;   // turn ended, or the reply already owns audio
+    if (mine !== ackSeq) return;                        // a newer cue superseded us during synth
+    if (myTurn !== turnSeq || replyStarted) return;     // turn ended, or the reply already owns audio
     ackPlaying = true;
     ackPlayer.src = url;
-    ackPlayer.onended = ackPlayer.onerror = () => { ackPlaying = false; };
-    await ackPlayer.play().catch(() => { ackPlaying = false; });
-  } catch (e) { ackPlaying = false; }
+    // Only the latest cue may clear ackPlaying: a superseded older cue's end/error must not flip it
+    // off while the newer cue is still sounding (that would un-suppress barge self-trigger).
+    ackPlayer.onended = ackPlayer.onerror = () => { if (mine === ackSeq) ackPlaying = false; };
+    await ackPlayer.play().catch(() => { if (mine === ackSeq) ackPlaying = false; });
+  } catch (e) { if (mine === ackSeq) ackPlaying = false; }
 }
 
 // ----------------------------------------------------------------- one turn
@@ -275,7 +337,7 @@ async function streamMessage(text) {
   replyStarted = false;
   const myTurn = ++turnSeq;
   startBargeMonitor();
-  playAck(myTurn);                  // spoken "on it" in the persona voice while the agent works
+  armAck(myTurn);                   // arm the "thinking" cue if the turn runs long; tools cue themselves
   assistantEl = null;
   let full = '';
   msgAbort = new AbortController();
@@ -295,19 +357,21 @@ async function streamMessage(text) {
       const line = buf.slice(0, i).split('\n').find((l) => l.startsWith('data:'));
       buf = buf.slice(i + 2);
       if (!line) continue;
-      full = onEvent(JSON.parse(line.slice(5).trim()), full);
+      full = onEvent(JSON.parse(line.slice(5).trim()), full, myTurn);
     }
   }
 }
 
-function onEvent(evt, full) {
+function onEvent(evt, full, myTurn) {
   if (evt.type === 'text') {
     if (!assistantEl) assistantEl = addMsg('assistant', '');
     full += evt.text; assistantEl.textContent = full;
     transcript.scrollTop = transcript.scrollHeight;
+  } else if (evt.type === 'status') {
+    clearAckTimer(); playAck(myTurn, evt.phrase);   // server named the current action — speak what it's doing
   } else if (evt.type === 'tool') {
     const inp = evt.input && (evt.input.command || evt.input.file_path || evt.input.path || evt.input.pattern || '');
-    addMsg('tool', '› ' + evt.name + (inp ? ': ' + inp : ''));
+    addMsg('tool', '› ' + evt.name + (inp ? ': ' + inp : ''));   // transcript only; voice handled by `status`
   } else if (evt.type === 'denied') {
     addMsg('denied', '⊘ blocked: ' + evt.reason);
   } else if (evt.type === 'error') {
@@ -320,7 +384,7 @@ function onEvent(evt, full) {
 
 async function speak(text) {
   if (!text) return finishTurn();
-  replyStarted = true;                          // a late ack cue must not talk over the real reply
+  replyStarted = true; clearAckTimer();         // reply is here — a pending/late ack cue must not talk over it
   try {
     setStatus('Speaking…');
     const r = await api('/api/tts', {
@@ -340,6 +404,8 @@ function finishTurn() {
   stopBargeMonitor();
   busy = false; talkBtn.disabled = false; msgAbort = null; replyStarted = false;
   turnSeq++;                                    // a still-pending ack for this turn won't play
+  clearAckTimer();
+  ackPlaying = false; try { ackPlayer.pause(); } catch (e) {}   // silence a cue still sounding (tool-only / empty reply)
   if (ackAbort) { try { ackAbort.abort(); } catch (e) {} ackAbort = null; }
   if (auto) relisten(); else setStatus('Ready');
 }
@@ -457,7 +523,10 @@ async function loadConfig() {
     if (c.pause_ms) vadPauseMs = c.pause_ms;
     if (c.max_ms) vadMaxMs = c.max_ms;
     if (c.barge_sensitivity) bargeSensitivity = c.barge_sensitivity;
+    if (typeof c.speech_floor === 'number') vadSpeechFloor = c.speech_floor;
     if (typeof c.status_ack === 'boolean') ackEnabled = c.status_ack;
+    if (typeof c.ack_thinking === 'boolean') ackThinking = c.ack_thinking;
+    if (typeof c.ack_delay_ms === 'number') ackDelayMs = c.ack_delay_ms;
     if (c.ack_phrase && c.ack_phrase !== ackPhrase) { ackPhrase = c.ack_phrase; clearAckCache(); }
     meta.textContent = (c.model || '') + ' · ' + (c.stt || '') + '/' + (c.tts || '');
   } catch (e) {}

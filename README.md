@@ -80,10 +80,14 @@ loop (it re-listens after each reply). **Stop** barges in. **Clear** starts a fr
 conversation (or just say "clear") — it drops the live context and stops auto-recalling
 earlier turns; the on-disk transcript is kept.
 
-The instant a command registers, the assistant speaks a short acknowledgement (default "On it")
-in its own voice — so while driving you can hear that it landed and is working, before the full
-reply arrives. It's synthesized once and cached, so it's instant and free after the first use.
-Say "turn off acknowledgements" to silence it, or ask it to change what it says
+When a turn takes real work, the assistant speaks a short cue in its own voice that names what
+it's doing — "Reading files.", "Editing a file.", "Running a command.", "Searching the web." — so
+while driving you hear that it's working before the full reply arrives, and roughly what's taking
+the time. While it's only thinking (no tool yet) past a couple of seconds, the cue is a plain
+"Thinking." (set by `ack_phrase`). A quick one-line answer skips cues entirely, so nothing is
+repeated after every prompt. Each phrase is synthesized once and cached, so it's instant and free
+after the first use. Say "turn off acknowledgements" to silence them, change how long it waits
+before the first cue (`ack_delay_ms`, 0 = every turn), or ask it to change the thinking phrase
 (`status_ack` / `ack_phrase` in `preferences.json`).
 
 ## Personalities

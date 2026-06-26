@@ -13,6 +13,7 @@ the error instead of crashing startup.
 
 Events yielded by `ask()` (consumed by server.main, streamed to the PWA):
   {"type":"text","text":str} {"type":"tool","name":str,"input":dict}
+  {"type":"status","phrase":str}  (a short spoken activity cue, e.g. "Reading files.")
   {"type":"denied","tool":str,"reason":str} {"type":"done","text":str}
 """
 from __future__ import annotations
@@ -66,9 +67,14 @@ interrupted), "read_only" (true = make no file changes and run nothing), "max_wo
 (reply length cap, 0 = none), "max_turns" (tool-loop cap, 0 = default), "daily_budget_usd" \
 (advisory daily limit), "tts_model" ("fast" or "quality"), "stt_language" (e.g. "en"), \
 "recall_turns" (how many past turns to auto-recall at session start, 0 = off), \
-"status_ack" (true = speak a short acknowledgement the moment a command registers, so the \
-driver hears it landed before your reply), "ack_phrase" (what that acknowledgement says, e.g. \
-"On it"). Model and effort apply on your next turn.
+"status_ack" (true = speak short spoken cues while you work — the app names the action aloud, \
+e.g. "Reading files." or "Running a command." — but only when a turn runs long or uses a tool, \
+not after quick replies), "ack_thinking" (true = also speak a cue while you are only thinking with \
+no tool yet; false by default, so pure thinking stays silent and only tool actions cue), \
+"ack_delay_ms" (when ack_thinking is on, how long you may think before that cue sounds, \
+0–15000 ms; a tool always triggers its own cue immediately; 0 = cue every turn), "ack_phrase" (what the \
+thinking cue says, e.g. "Thinking"). Model and effort \
+apply on your next turn.
 - {PROJECT_ROOT}/personalities/<id>.md — persona files: frontmatter with \
 `name` and `voice_id`, then the personality prompt. Add or edit one to create/change a \
 personality."""
@@ -186,6 +192,27 @@ def _tool_label(name: str, short: dict[str, Any]) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+# Spoken activity cues. The PWA reads only the agent's reply aloud, so during a long turn the
+# driver hears nothing until it finishes. Mapping each tool to a short phrase lets the client
+# speak WHAT is happening ("Reading files." while it reads, "Running a command." for bash)
+# instead of one generic "On it." De-duplication is server-side: ask() emits a `status` event
+# only when the phrase changes, so a burst of Reads cues "Reading files." just once.
+_TOOL_PHRASES = {
+    "Read": "Reading files.", "NotebookRead": "Reading files.",
+    "Glob": "Searching your files.", "Grep": "Searching your files.",
+    "Write": "Writing a file.",
+    "Edit": "Editing a file.", "MultiEdit": "Editing a file.", "NotebookEdit": "Editing a file.",
+    "Bash": "Running a command.", "BashOutput": "Running a command.", "KillShell": "Running a command.",
+    "WebFetch": "Reading a web page.", "WebSearch": "Searching the web.",
+    "TodoWrite": "Planning.",
+}
+
+
+def _tool_phrase(name: str) -> str:
+    """A short spoken cue describing what a tool call is doing (generic fallback)."""
+    return _TOOL_PHRASES.get(name, "Working on it.")
+
+
 class CarAgent:
     def __init__(self, cfg: Settings) -> None:
         self.cfg = cfg
@@ -292,6 +319,12 @@ class CarAgent:
         self._denials.clear()
         parts: list[str] = []
         tools_used: list[str] = []
+        last_phrase: str | None = None   # last spoken activity cue -> only re-cue when it changes
+        # The cue is spoken the moment a tool is requested (before the gate runs) so the driver
+        # hears it while a long tool runs, not after. In read-only mode the gate ALWAYS denies
+        # exec/network tools, so cueing them would announce work that never happens -> mute those.
+        # (Writes can still be the allowed preferences.json edit, so they stay cue-worthy.)
+        muted = (_EXEC_TOOLS | _NET_TOOLS) if prefs.load()["read_only"] else set()
 
         await client.query(text)
         async for message in client.receive_response():
@@ -304,6 +337,10 @@ class CarAgent:
                     elif isinstance(block, sdk.ToolUseBlock):
                         si = _short_input(block.input)
                         tools_used.append(_tool_label(block.name, si))
+                        phrase = _tool_phrase(block.name)
+                        if phrase != last_phrase and block.name not in muted:  # new activity -> cue it
+                            last_phrase = phrase
+                            yield {"type": "status", "phrase": phrase}
                         yield {"type": "tool", "name": block.name, "input": si}
             elif isinstance(message, sdk.ResultMessage):
                 usage.record_claude(getattr(message, "total_cost_usd", 0),
